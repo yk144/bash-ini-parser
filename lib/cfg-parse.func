@@ -1,0 +1,268 @@
+#!/bin/bash
+# yk
+
+# exit on errors
+set -TeE
+
+############################################################################
+# global variables
+############################################################################
+
+# utf8
+export LANG="en_US.UTF-8"
+export LC_CTYPE="ru_RU.UTF-8"
+export LC_NUMERIC="en_US.UTF-8"
+export LC_TIME="en_US.UTF-8"
+export LC_COLLATE="ru_RU.UTF-8"
+export LC_MONETARY="en_US.UTF-8"
+export LC_MESSAGES="en_US.UTF-8"
+export LC_PAPER="en_US.UTF-8"
+export LC_NAME="en_US.UTF-8"
+export LC_ADDRESS="en_US.UTF-8"
+export LC_TELEPHONE="en_US.UTF-8"
+export LC_MEASUREMENT="en_US.UTF-8"
+export LC_IDENTIFICATION="en_US.UTF-8"
+export LC_ALL=
+
+evaluate() {
+    local STR="$1"
+    echo "$(eval echo "$(chomp "$STR")")"
+}
+
+
+msg() {
+    local STR="$(date '+%Y-%m-%d %H:%M:%S.%N'|cut -c -23) $(basename $0) $$ $(id -un)@$(hostname --short) $COMPONENT$INFO $*"
+    echo "$STR"
+}
+
+debug() {
+    if [[ -n "$DEBUG" ]]; then
+        msg "$*"    
+    fi
+}
+
+debug2() {
+    if [[ "$DEBUG" -ge 2 ]]; then
+        msg "$*"    
+    fi
+}
+
+cfg.parse() {
+    # yk 
+    # распарсить ini файл
+    #
+    # парамерты функции:
+    #   cfg.parse имя_ini_файла
+    #
+    # TODO сбработка ошибки при пустом конфиге и секции без параметров
+    #
+    # на выходе будет 
+    # переменная $CFG_SECTIONS - имена секций для перебора через for SECTION in $CFG_SECTIONS # без кавычек
+    # функции:
+    #   - активация переменных секции
+    #      cfg.section.ИМЯ_СЕКЦИИ
+    #
+    #   - unset переменных секции
+    #      cfg.section.unset.ИМЯ_СЕКЦИИ
+    # 
+    # в переменных секции можно использовать переменные, определенные до этого в данной секции
+    # или в секции "global"
+    # имя текущей секции хранится в переменной $SECTION  
+    # 
+    # мпециальные секции:
+    # [global] - глобальные переменные для всех секций
+    #
+    # можно включать файлы в основной конфиг
+    # подключаемый файл находиться в том же каталоге, что и основной
+    # include inc-file.cfg
+    # если нужно подключить файл, которые в другом каталоге, то путь расчитывается от каталога 
+    # гдележит основной файл
+    # include ../../inc-file2.cfg
+    #
+    # пример:
+    #>>>>>> foobar.ini основной файл (кавычки в параметрах с пробелами не нужны)
+    #   [global]
+    #   FOO1=foo bar baz
+    #
+    #   [foobar]
+    #   FOO2=quz quuz quuuz
+    #   include quuuz.ini                  # переменную FOO2 можно использовать quuuz.ini
+    #   BARBAZ=quuuuuuuz                   # если нужно переменную можно переопределить ниже 
+    #>>>>>>                                # например, если она определена во включаемом файле
+    #
+    #>>>>>>  quuuz.ini файл, который будем включать в основной
+    #   BAR=$FOO2   
+    #   BARBAZ=bar baz bar
+    #>>>>>>
+    #
+    #   cfg.parse /tmp/foobar.ini          # распарсить конфиг
+    #   for SECTION in $CFG_SECTIONS; do   # проходим по всем секциям (global в этом списке не будет)
+    #     cfg.section.SECTION              # активация переменных секции
+    #     echo "$FOO1"                     # использование переменной из конфига
+    #     cfg.section.unset.$SECTION       # деактивация переменных секции
+    #   done
+
+    if [[ ! -r "$1" ]]; then 
+        echo "$(date) ERROR cfg.parse cant read config file \"$1\""
+        exit 1
+    fi
+    
+    local CFG_FILE_DIR="$(dirname "$1")"    
+    debug "config file dir: $CFG_FILE_DIR"
+    debug "config file name: $1"
+
+    # массив для полного конфига с инклудами
+    CONFIG_AR=()
+
+    # читаем основной конфиг
+    readarray -t CONFIG_AR_MAIN < "$1"
+    local STR=""
+    
+    for STR in "${CONFIG_AR_MAIN[@]}" ; do
+        # пропускаем коменты и пустые строки
+        [[ "${STR:0:1}" == "#" ]] && continue
+        [[ ${#STR} -le 2 ]] && continue # A=1 [S]
+
+        if [[ "$DEBUG" -ge 2 ]] ; then 
+            echo ">$STR<"
+        fi
+
+        if [[ "$STR" == "include "* ]]; then
+            local INC_FILE="${STR#* }"
+            debug "include file $INC_FILE"
+            readarray -t CONFIG_AR_INC < "$CFG_FILE_DIR/$INC_FILE"
+            if [[ "$DEBUG" -ge 2 ]]; then
+                # debug included file
+                local a=""
+                for a in "${CONFIG_AR_INC[@]}"; do
+                    [[ "${a:0:1}" == "#" ]] && continue
+                    [[ ${#a} -le 2 ]] && continue # A=1 [S]
+                    echo ">$a<"
+                done
+            fi
+            CONFIG_AR=("${CONFIG_AR[@]}" "${CONFIG_AR_INC[@]}")
+        else
+            CONFIG_AR=("${CONFIG_AR[@]}" "$STR")
+        fi
+    done
+    
+    # дебаг конфига целиком
+    if [[ "$DEBUG" -ge 2 ]]; then
+        debug "====================================="
+        debug "resulting config with included files:"
+        for STR in "${CONFIG_AR[@]}" ; do
+            [[ "${STR:0:1}" == "#" ]] && continue
+            [[ ${#STR} -le 2 ]] && continue # A=1 [S]
+            echo ">$STR<"
+        done
+    fi
+    
+    # очистить все переменные, используемые в конфиге и заполнить массив переменных
+    for STR in "${CONFIG_AR[@]}" ; do
+        # пропускаем коменты и пустые строки
+        [[ "${STR:0:1}" == "#" ]] && continue
+        [[ "${STR:0:1}" == "[" ]] && continue
+        [[ ${#STR} -le 1 ]] && continue
+        unset ${STR%%=*}
+        CFG_VARS="$CFG_VARS ${STR%%=*}" 
+    done
+    export CFG_VARS
+    debug "all config vars CFG_VARS=$CFG_VARS"
+
+    # обработка конфига 
+    local SECTION=""
+    CFG_SECTIONS="" # не local тк его потом экспортить
+    local SECTION_BODY=""
+    local SECTION_BODY_UNSET=""
+    for STR in "${CONFIG_AR[@]}" ; do
+        # пропускаем коменты и пустые строки
+        [[ "${STR:0:1}" == "#" ]] && continue
+        [[ ${#STR} -le 3 ]] && continue # A=1 [S]
+
+        # секция
+        if [[ "${STR:0:1}" == '[' ]] ; then
+            if [[ -n "$SECTION" ]]; then
+                # unset переменных секции
+                debug "eval cfg.section.unset.$SECTION() { $SECTION_BODY_UNSET }"
+                eval "cfg.section.unset.$SECTION() { $SECTION_BODY_UNSET }";
+                # export переменных секции
+                debug "eval cfg.section.$SECTION() { $SECTION_BODY }"
+                eval "cfg.section.$SECTION() { $SECTION_BODY }";
+                unset SECTION SECTION_BODY SECTION_BODY_UNSET
+            fi
+
+            STR="${STR/\[/}"
+            STR="${STR/\]/}"
+            SECTION="$STR"
+            CFG_SECTIONS="$CFG_SECTIONS $SECTION"
+            continue
+
+        # параметры секций
+        else
+            if [[ -n "$SECTION" ]]; then
+                local STR_NAME_VAL="${STR//\"/\\\"}"                       # экранирование двойных кавычек
+                local STR_NAME_VAL="${STR//\$/\\\$}"                       # экранирование $
+                local NAME="${STR%%=*}"                                    # оставить всё до = , после = всё откусить 
+                local VAL="${STR#*=}"                                      # оставить всё после = , до = всё откусить
+                if declare -F "cfg.section.global" >/dev/null ; then       # применить переменные секции global для eval
+                    cfg.section.global                              
+                fi
+                debug "eval $SECTION_BODY"
+                eval "$SECTION_BODY"                                       # применить переменные, определенные ранее для eval
+            
+                # eval value, упасть если не ок 
+                local EVAL_VAL_FILE="$(mktemp)"
+                debug2 "eval echo \"$VAL\""
+                eval echo \"$VAL\" > $EVAL_VAL_FILE                        # eval > file, что бы падать при падении eval
+                local EXP_STR="export $NAME=\"$(<$EVAL_VAL_FILE)\""
+                debug2 "res= $EXP_STR"
+                rm -f $EVAL_VAL_FILE
+                
+                local UNSET_STR="unset ${NAME}"                            # unset переменной
+                SECTION_BODY="$SECTION_BODY $EXP_STR;"                     # формирование списка для активации переменных секции
+                SECTION_BODY_UNSET="$SECTION_BODY_UNSET $UNSET_STR;"       # формирование списка для unset переменных секции
+                debug "eval $SECTION_BODY_UNSET"
+                eval "$SECTION_BODY_UNSET"                                 # unset переменных конфига
+                if declare -F "cfg.section.global" >/dev/null ; then       # unset переменных секции global
+                    cfg.section.unset.global
+                fi
+            fi
+        fi
+    done
+
+    # создание функций для последней секции
+    debug "eval cfg.section.$SECTION() { $SECTION_BODY }"
+    eval "cfg.section.$SECTION() { $SECTION_BODY }"
+    debug "eval cfg.section.unset.$SECTION() { $SECTION_BODY_UNSET }"
+    eval "cfg.section.unset.$SECTION() { $SECTION_BODY_UNSET }"
+    unset SECTION SECTION_BODY SECTION_BODY_UNSET
+
+    # убрать global из списка секций
+    local CFG_SECTIONS_TMP=""
+    local SECTION=""
+    for SECTION in $CFG_SECTIONS; do
+        # убрать global из списка секций
+        [[ "$SECTION" == "global" ]] && continue
+        CFG_SECTIONS_TMP="$CFG_SECTIONS_TMP $SECTION"
+    done
+    export CFG_SECTIONS="$CFG_SECTIONS_TMP"
+
+    debug "CFG_SECTIONS=$CFG_SECTIONS"
+}
+
+# получить список секций конфига
+cfg.list.sections() {
+    CFG_FILE_DIR="$(dirname "$1")"  
+    debug "config file dir: $CFG_FILE_DIR"
+
+    cat "$1" | while read STR; do
+        if grep -E '^\[' <<< "$STR" | grep -v -F "[global]" ; then
+            echo "$STR" | tr -d '[]'
+        fi
+        if [[ "$STR" == "include "* ]]; then
+            INC_FILE="${STR#* }"
+            cat "$CFG_FILE_DIR/$INC_FILE" | grep -E '^\['|grep -v -Fx "[global]"|tr -d '[]'
+        fi
+    done
+}
+
